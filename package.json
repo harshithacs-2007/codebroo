@@ -1,0 +1,25 @@
+{
+  "name": "codebroo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Don't memorize. Get it.",
+  "workspaces": [
+    "packages/core",
+    "apps/web",
+    "apps/server"
+  ],
+  "scripts": {
+    "executor:build": "node scripts/build-executor.mjs",
+    "dev": "npm run executor:build && concurrently -n web,api -c cyan,magenta \"npm run dev -w @codebroo/web\" \"npm run dev -w @codebroo/server\"",
+    "build": "npm run executor:build && npm run build -w @codebroo/core && npm run build -w @codebroo/web && npm run build -w @codebroo/server",
+    "start": "npm run start -w @codebroo/server",
+    "test": "npm run test -w @codebroo/core && npm run test -w @codebroo/server",
+    "test:executor": "node scripts/test-executor.mjs"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

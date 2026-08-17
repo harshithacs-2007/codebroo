@@ -1,0 +1,45 @@
+app = "codebroo"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  CODEBROO_HOST = "0.0.0.0"
+  CODEBROO_PORT = "8787"
+  CODEBROO_DATA_DIR = "/app/data"
+  CODEBROO_SANDBOX_DIR = "/app/sandbox"
+  CODEBROO_WEB_DIST = "/app/apps/web/dist"
+  CODEBROO_EXEC_TIMEOUT_MS = "5000"
+  CODEBROO_MAX_OUTPUT_BYTES = "65536"
+  CODEBROO_MAX_SOURCE_BYTES = "32768"
+  CODEBROO_EXEC_CONCURRENCY = "2"
+
+[http_service]
+  internal_port = 8787
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "requests"
+    hard_limit = 25
+    soft_limit = 15
+
+[[http_service.checks]]
+  interval = "30s"
+  timeout = "5s"
+  grace_period = "45s"
+  method = "GET"
+  path = "/api/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1024mb"
+
+[mounts]
+  source = "codebroo_data"
+  destination = "/app/data"
