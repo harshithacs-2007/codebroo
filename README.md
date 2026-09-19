@@ -43,9 +43,21 @@ docker build -t codebroo .
 docker run --rm -p 8787:8787 -e CODEBROO_SECRET=... codebroo
 ```
 
-## Isolation (honest)
+## Security (honest)
 
-Learner code never runs inside the Node process. The supervisor (`BrooExecutor`) launches a debuggee JVM with memory caps, a step cap, a wall-clock timeout, output caps, a private temp directory, and a source denylist. There is no Docker on the default Windows dev machine; this is process isolation plus resource limits, not a gVisor jail. Production should run the executor host with no network and least privilege.
+Learner code is untrusted. The Node API does not execute learner Java in-process; `BrooExecutor` launches a child JVM and the service applies source limits, a wall-clock timeout, memory/stack caps, output limits, step limits, a private working directory, a sanitized child environment, and a source-policy layer.
+
+That still is **not a complete hostile-code sandbox**. A denylist can be bypassed and JVM process isolation is not equivalent to a VM/container security boundary. Public production must put the executor behind a separate isolation boundary with network egress disabled, least privilege, syscall restrictions and hard CPU/memory/process limits. See [docs/SECURITY.md](docs/SECURITY.md).
+
+## Scaling model
+
+The current SQLite deployment is a single-instance MVP. Before horizontal scaling, move durable learner state to managed PostgreSQL-compatible storage and move code execution to a separately deployable worker pool behind a durable queue. The worker pool should scale independently from the web/API tier.
+
+Overload must be bounded: reject new execution jobs with 503 rather than allowing an unbounded in-memory queue to consume the host.
+
+## Legal / IP
+
+CodeBroo should use original product artwork, copy and lesson content and keep third-party license/attribution records. Do not copy the distinctive visual identity, artwork or branding of other learning products. Before commercial launch, perform formal trademark clearance for “CodeBroo” and related marks and have Terms, Privacy and Acceptable Use policies reviewed for the jurisdictions served. See [docs/LEGAL_LAUNCH.md](docs/LEGAL_LAUNCH.md).
 
 ## Tests
 
