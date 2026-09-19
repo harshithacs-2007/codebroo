@@ -20,7 +20,13 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   health: () => req<{ ok: boolean }>("/api/health"),
-  me: () => req<{ learner: { id: string; name: string } }>("/api/me"),
+  me: () =>
+    req<{
+      learner: { id: string; name: string; buddyId: "mochi" | "bibi" | "momo" | "koko" | "pip"; onboarded: boolean };
+      buddies: Array<"mochi" | "bibi" | "momo" | "koko" | "pip">;
+    }>("/api/me"),
+  updateProfile: (body: { name?: string; buddyId?: "mochi" | "bibi" | "momo" | "koko" | "pip" }) =>
+    req<{ ok: boolean }>("/api/me", { method: "POST", body: JSON.stringify(body) }),
   lesson: (id: string) =>
     req<{
       lesson: Lesson;
