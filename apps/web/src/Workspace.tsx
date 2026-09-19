@@ -8,10 +8,10 @@ import type {
   Snapshot,
   TutorTurn,
 } from "@codebroo/core";
-import { EMPTY_EVIDENCE, TWO_REMOTE_CONTROLS } from "@codebroo/core";
+import { EMPTY_EVIDENCE, TWO_REMOTE_CONTROLS, type BuddyId } from "@codebroo/core";
 import { api } from "./api";
 import { Broo } from "./Broo";
-import { HeapViz } from "./HeapViz";
+import { HeapViz } from "./HeapViz";\nimport { BuddyPicker } from "./BuddyPicker";
 
 const JavaEditor = lazy(() => import("./JavaEditor").then((m) => ({ default: m.JavaEditor })));
 
@@ -27,6 +27,8 @@ export function Workspace() {
   const [mastered, setMastered] = useState(false);
   const [skills, setSkills] = useState<Array<{ id: string; label: string; value: number }>>([]);
   const [loadErr, setLoadErr] = useState<string | null>(null);
+  const [buddyId, setBuddyId] = useState<BuddyId>("mochi");
+  const [showBuddyPicker, setShowBuddyPicker] = useState(false);
 
   const [choice, setChoice] = useState<string | null>(null);
   const [predictResult, setPredictResult] = useState<{ correct: boolean; reveal: string[] } | null>(null);
@@ -54,6 +56,10 @@ export function Workspace() {
 
   const load = useCallback(async () => {
     try {
+      const me = await api.me();
+      setBuddyId(me.learner.buddyId);
+      setShowBuddyPicker(!me.learner.onboarded);
+
       const [l, s] = await Promise.all([api.lesson(LESSON_ID), api.skills()]);
       setLesson(l.lesson);
       setIndex(l.progress.block_index);
@@ -126,6 +132,21 @@ export function Workspace() {
     await api.progress(LESSON_ID, far, unlockedRun).catch(() => undefined);
   }
 
+  async function chooseBuddy(next: BuddyId) {
+    setBuddyId(next);
+    setShowBuddyPicker(false);
+    try {
+      await api.updateProfile({ buddyId: next });
+    } catch (e) {
+      setShowBuddyPicker(true);
+      setTutor({
+        text: e instanceof Error ? e.message : "Couldn't save your buddy yet.",
+        companion: "warning",
+        escalate: false,
+      });
+    }
+  }
+
   async function submitPredict() {
     if (!block || (block.kind !== "predict" && block.kind !== "transfer") || !choice || busy) return;
     setBusy(true);
@@ -195,7 +216,7 @@ export function Workspace() {
       } else if (res.result.exception) {
         setCompanion("investigating");
         setTutor({
-          text: `${res.result.exception.type}: ${res.result.exception.msg} @ ${res.result.exception.stack}`,
+          text: `${res.result.exception.type}: ${res.result.exception.msg}`,
           companion: "investigating",
           escalate: false,
         });
@@ -292,6 +313,8 @@ export function Workspace() {
       </div>
     );
   }
+  if (showBuddyPicker) return <BuddyPicker value={buddyId} onChoose={(id) => void chooseBuddy(id)} />;
+
   if (!lesson || !block) {
     return (
       <div className="crash">
@@ -401,8 +424,8 @@ export function Workspace() {
 
       <aside className="tutor">
         <div className="broo-dock">
-          {!hideBroo && <Broo state={companion} minimized={false} onToggle={() => setHideBroo(true)} />}
-          {hideBroo && <Broo state={companion} minimized onToggle={() => setHideBroo(false)} />}
+          {!hideBroo && <Broo buddyId={buddyId} state={companion} minimized={false} onToggle={() => setHideBroo(true)} />}
+          {hideBroo && <Broo buddyId={buddyId} state={companion} minimized onToggle={() => setHideBroo(false)} />}
           <div>
             <h2 style={{ border: 0, padding: 0 }}>Tutor</h2>
             <p className="tagline" style={{ color: "#3f3832" }}>
