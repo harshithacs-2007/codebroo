@@ -1,3 +1,5 @@
+export type BuddyId = "mochi" | "bibi" | "momo" | "koko" | "pip";
+
 export type CompanionState =
   | "idle"
   | "thinking"
