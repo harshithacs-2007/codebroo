@@ -346,8 +346,14 @@ export function Workspace() {
           <ol className="steps">
             {lesson.blocks.map((b, i) => (
               <li key={b.id}>
-                <button className={i === index ? "on" : ""} disabled={!canEnter(i)} onClick={() => void go(i)}>
-                  {i + 1}. {titleOf(b)}
+                <button
+                  className={(i === index ? "on " : "") + (i <= farthest ? "visited" : "")}
+                  disabled={!canEnter(i)}
+                  aria-current={i === index ? "step" : undefined}
+                  onClick={() => void go(i)}
+                >
+                  <span className="step-node" aria-hidden="true">{i < farthest ? "✓" : i + 1}</span>
+                  <span>{titleOf(b)}</span>
                 </button>
               </li>
             ))}
