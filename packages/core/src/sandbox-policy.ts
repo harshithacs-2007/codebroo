@@ -25,7 +25,7 @@ const FORBIDDEN = [
 const SAFE_IMPORT = /^\s*import\s+(?:static\s+)?(?:java\.util(?:\.[A-Za-z_$][A-Za-z0-9_$]*)?|java\.math\.[A-Za-z_$][A-Za-z0-9_$]*);\s*$/;
 
 export function inspectSource(source: string, maxBytes: number): string | null {
-  const bytes = Buffer.byteLength(source, "utf8");
+  const bytes = new TextEncoder().encode(source).byteLength;
   if (bytes === 0) return "Source is empty.";
   if (bytes > maxBytes) return `Source exceeds ${maxBytes} bytes.`;
   if (source.includes("\0")) return "Source contains a null byte.";
