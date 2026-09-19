@@ -5,11 +5,13 @@ export function Broo({
   state,
   minimized,
   onToggle,
+  showToggle = true,
 }: {
   buddyId?: BuddyId;
   state: CompanionState;
   minimized: boolean;
   onToggle: () => void;
+  showToggle?: boolean;
 }) {
   const mood = moodFor(state);
   return (
@@ -47,9 +49,11 @@ export function Broo({
           )}
         </g>
       </svg>
-      <button className="ghost" style={{ marginTop: 4, padding: "0.15rem 0.5rem", fontSize: 11 }} onClick={onToggle}>
-        {minimized ? "Broo" : "Hide"}
-      </button>
+      {showToggle && (
+        <button className="ghost" style={{ marginTop: 4, padding: "0.15rem 0.5rem", fontSize: 11 }} onClick={onToggle}>
+          {minimized ? "Broo" : "Hide"}
+        </button>
+      )}
     </div>
   );
 }
