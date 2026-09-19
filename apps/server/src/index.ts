@@ -245,19 +245,32 @@ app.get("/api/health", (c) =>
   }),
 );
 
+const BUDDIES = ["mochi", "bibi", "momo", "koko", "pip"] as const;
+type BuddyId = typeof BUDDIES[number];
+
 app.get("/api/me", (c) => {
   const id = existingLearnerId(c) ?? createLearner(c);
-  const row = db.prepare("SELECT id, name, created_at FROM learners WHERE id = ?").get(id) as
-    | { id: string; name: string; created_at: number }
+  const row = db.prepare("SELECT id, name, buddy_id, onboarded, created_at FROM learners WHERE id = ?").get(id) as
+    | { id: string; name: string; buddy_id: BuddyId; onboarded: number; created_at: number }
     | undefined;
-  return c.json({ learner: row });
+  return c.json({
+    learner: row
+      ? { id: row.id, name: row.name, buddyId: row.buddy_id, onboarded: Boolean(row.onboarded), createdAt: row.created_at }
+      : null,
+    buddies: BUDDIES,
+  });
 });
 
 app.post("/api/me", async (c) => {
   const id = existingLearnerId(c) ?? createLearner(c);
   const body = (await jsonObject(c)) ?? {};
   const name = typeof body.name === "string" ? body.name.slice(0, 40).trim() : "";
+  const buddyId = typeof body.buddyId === "string" && BUDDIES.includes(body.buddyId as BuddyId)
+    ? (body.buddyId as BuddyId)
+    : null;
+  if (!name && !buddyId) return c.json({ error: "Provide a valid name or buddyId" }, 400);
   if (name) db.prepare("UPDATE learners SET name = ? WHERE id = ?").run(name, id);
+  if (buddyId) db.prepare("UPDATE learners SET buddy_id = ?, onboarded = 1 WHERE id = ?").run(buddyId, id);
   return c.json({ ok: true });
 });
 
