@@ -819,3 +819,54 @@ button:not(:disabled):active { transform: scale(0.985); }
   .choice.good, .choice.bad, .broo.success .body, .broo.celebrating .body, .broo.warning .body { animation: none; }
   .journey-track i { transition: none; }
 }
+
+
+/* The lesson rail is a path, not a generic sidebar menu. */
+.steps {
+  position: relative;
+  padding: 6px 0;
+}
+.steps::before {
+  content: "";
+  position: absolute;
+  left: 21px;
+  top: 26px;
+  bottom: 26px;
+  width: 2px;
+  background: oklch(1 0 0 / 0.09);
+}
+.steps li { position: relative; z-index: 1; }
+.steps button {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  position: relative;
+  text-align: left;
+}
+.step-node {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: oklch(0.26 0.025 42);
+  border: 1px solid oklch(1 0 0 / 0.12);
+  color: oklch(0.74 0.02 75);
+  font-size: 0.67rem;
+  font-family: var(--mono);
+  font-weight: 700;
+}
+.steps button.visited .step-node {
+  background: oklch(0.47 0.1 150);
+  border-color: oklch(0.47 0.1 150);
+  color: white;
+}
+.steps button.on .step-node {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: white;
+  box-shadow: 0 0 0 4px oklch(0.57 0.17 42 / 0.12);
+}
+.steps button.on { transform: translateX(3px); }
+.steps button.on:hover { transform: translateX(3px); }
