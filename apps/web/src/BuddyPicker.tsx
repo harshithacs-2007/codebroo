@@ -28,7 +28,7 @@ export function BuddyPicker({
               onClick={() => onChoose(buddy.id)}
             >
               <div className="buddy-art">
-                <Broo buddyId={buddy.id} state="idle" minimized={false} onToggle={() => undefined} />
+                <Broo buddyId={buddy.id} state="idle" minimized={false} showToggle={false} onToggle={() => undefined} />
               </div>
               <div className="buddy-copy">
                 <strong>{buddy.name}</strong>
