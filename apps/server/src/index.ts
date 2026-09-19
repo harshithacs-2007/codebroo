@@ -117,9 +117,12 @@ function existingLearnerId(c: { req: { raw: Request }; header: (n: string) => st
   const token = getCookie(c as never, "broo_sid");
   const id = readSessionToken(effectiveSecret, token, Date.now(), SESSION_TTL_MS);
   if (!id) return null;
-  const row = db.prepare("SELECT id FROM learners WHERE id = ?").get(id) as { id: string } | undefined;
+  const row = db.prepare("SELECT last_seen FROM learners WHERE id = ?").get(id) as { last_seen: number } | undefined;
   if (!row) return null;
-  db.prepare("UPDATE learners SET last_seen = ? WHERE id = ?").run(Date.now(), id);
+  const now = Date.now();
+  if (now - row.last_seen > 5 * 60 * 1000) {
+    db.prepare("UPDATE learners SET last_seen = ? WHERE id = ?").run(now, id);
+  }
   return id;
 }
 
