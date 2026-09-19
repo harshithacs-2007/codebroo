@@ -2,10 +2,14 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
+const ATTEMPT_RETENTION_MS = 1000 * 60 * 60 * 24 * 90;
+
 export function openDb(path: string): DatabaseSync {
   mkdirSync(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
   db.exec("PRAGMA journal_mode = WAL;");
+  db.exec("PRAGMA synchronous = NORMAL;");
+  db.exec("PRAGMA busy_timeout = 5000;");
   db.exec("PRAGMA foreign_keys = ON;");
   db.exec(`
     CREATE TABLE IF NOT EXISTS learners (
@@ -54,6 +58,20 @@ export function openDb(path: string): DatabaseSync {
       PRIMARY KEY (learner_id, lesson_id),
       FOREIGN KEY (learner_id) REFERENCES learners(id)
     );
+    CREATE INDEX IF NOT EXISTS idx_attempts_learner_created
+      ON attempts (learner_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_mistakes_learner_recency
+      ON mistakes (learner_id, recency DESC);
   `);
+  pruneOldAttempts(db);
   return db;
+}
+
+function pruneOldAttempts(db: DatabaseSync) {
+  try {
+    const cutoff = Date.now() - ATTEMPT_RETENTION_MS;
+    db.prepare("DELETE FROM attempts WHERE created_at < ?").run(cutoff);
+  } catch {
+    // Retention cleanup must never prevent the app from starting.
+  }
 }
