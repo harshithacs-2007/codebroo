@@ -11,32 +11,33 @@ export type ExecConfig = {
   maxOutput: number;
   maxSource: number;
   concurrency: number;
+  maxPending: number;
   maxSteps: number;
 };
 
 type Gate = { active: number; wait: Array<() => void> };
+const gate: Gate = { active: 0, wait: [] };
+const running = new Map<string, { kill: () => void }>();
 
-function take(gate: Gate, limit: number): Promise<void> {
-  if (gate.active < limit) {
-    gate.active++;
-    return Promise.resolve();
+function take(g: Gate, limit: number, maxPending: number): Promise<boolean> {
+  if (g.active < limit) {
+    g.active++;
+    return Promise.resolve(true);
   }
-  return new Promise((res) => {
-    gate.wait.push(() => {
-      gate.active++;
-      res();
+  if (g.wait.length >= maxPending) return Promise.resolve(false);
+  return new Promise((resolvePromise) => {
+    g.wait.push(() => {
+      g.active++;
+      resolvePromise(true);
     });
   });
 }
 
-function release(gate: Gate) {
-  gate.active--;
-  const n = gate.wait.shift();
-  if (n) n();
+function release(g: Gate) {
+  g.active = Math.max(0, g.active - 1);
+  const next = g.wait.shift();
+  if (next) next();
 }
-
-const gate: Gate = { active: 0, wait: [] };
-const running = new Map<string, { kill: () => void }>();
 
 function isInside(root: string, candidate: string): boolean {
   const r = resolve(root) + sep;
@@ -61,12 +62,24 @@ export async function runJava(opts: {
   if (denied) {
     return emptyResult(started, { denied, events: [{ t: "denied", reason: denied }] });
   }
+
   const className = extractPublicClass(opts.source) ?? "Main";
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(className)) {
-    return emptyResult(started, { denied: "Invalid class name", events: [{ t: "denied", reason: "Invalid class name" }] });
+    return emptyResult(started, {
+      denied: "Invalid class name",
+      events: [{ t: "denied", reason: "Invalid class name" }],
+    });
   }
 
-  await take(gate, opts.cfg.concurrency);
+  const acquired = await take(gate, opts.cfg.concurrency, opts.cfg.maxPending);
+  if (!acquired) {
+    return emptyResult(started, {
+      denied: "Execution capacity is busy. Retry in a moment.",
+      busy: true,
+      events: [{ t: "denied", reason: "executor-busy" }],
+    });
+  }
+
   const prev = running.get(opts.sessionId);
   prev?.kill();
 
@@ -86,7 +99,7 @@ export async function runJava(opts: {
       try {
         child.kill("SIGKILL");
       } catch {
-        /* ignore */
+        // ignore
       }
     }
   };
@@ -119,11 +132,22 @@ export async function runJava(opts: {
       String(opts.cfg.maxOutput),
     ];
 
+    const safeEnv = {
+      PATH: process.env.PATH || "/usr/bin:/bin",
+      HOME: dir,
+      TMPDIR: dir,
+      LANG: "C.UTF-8",
+      LC_ALL: "C.UTF-8",
+    };
+
     await new Promise<void>((resolvePromise, reject) => {
       child = spawn("java", args, {
         windowsHide: true,
+        cwd: dir,
+        env: safeEnv,
         stdio: ["ignore", "pipe", "pipe"],
       });
+
       const timer = setTimeout(() => {
         timedOut = true;
         kill();
@@ -150,10 +174,11 @@ export async function runJava(opts: {
             if (ev.t === "denied") deniedReason = ev.reason;
             if (ev.t === "exception") exception = { type: ev.type, msg: ev.msg, stack: ev.stack };
           } catch {
-            /* ignore malformed */
+            // Ignore malformed supervisor lines.
           }
         }
       };
+
       child.stdout?.on("data", (c) => onChunk(c, "stdout"));
       child.stderr?.on("data", (c) => onChunk(c, "stderr"));
       child.on("error", (err) => {
@@ -181,13 +206,13 @@ export async function runJava(opts: {
       exception,
       timedOut,
       denied: deniedReason,
+      busy: false,
       durationMs: Date.now() - started,
     };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : "executor failed";
+  } catch {
     return emptyResult(started, {
-      events: [{ t: "denied", reason: msg }],
-      denied: msg,
+      events: [{ t: "denied", reason: "executor-failed" }],
+      denied: "Execution service failed safely.",
     });
   } finally {
     running.delete(opts.sessionId);
@@ -195,7 +220,7 @@ export async function runJava(opts: {
     try {
       rmSync(dir, { recursive: true, force: true });
     } catch {
-      /* ignore */
+      // Cleanup is best-effort.
     }
   }
 }
@@ -210,6 +235,7 @@ function emptyResult(started: number, extra: Partial<ExecutionResult> & { events
     compileErrors: [],
     timedOut: extra.timedOut ?? false,
     denied: extra.denied,
+    busy: extra.busy ?? false,
     durationMs: Date.now() - started,
   };
 }

@@ -29,7 +29,7 @@ import {
   type MistakeType,
 } from "@codebroo/core";
 import { openDb } from "./db.ts";
-import { makeSessionToken, newLearnerId, readSessionToken } from "./session.ts";
+import { makeSessionToken, newLearnerId, readSessionToken, SESSION_TTL_MS } from "./session.ts";
 import { runJava, stopJava, type ExecConfig } from "./run-java.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
@@ -52,20 +52,27 @@ const allowedOrigins = (process.env.CODEBROO_ALLOWED_ORIGINS || process.env.CODE
   .map((s) => s.trim().replace(/\/$/, ""))
   .filter(Boolean);
 
+const clampInt = (value: number, min: number, max: number, fallback: number) =>
+  Number.isFinite(value) ? Math.max(min, Math.min(max, Math.trunc(value))) : fallback;
+
 const cfg: ExecConfig = {
   executorCp: join(root, "apps", "executor", "classes"),
   sandboxRoot: sandboxDir,
-  timeoutMs: Number(process.env.CODEBROO_EXEC_TIMEOUT_MS || 5000),
-  maxOutput: Number(process.env.CODEBROO_MAX_OUTPUT_BYTES || 65536),
-  maxSource: Number(process.env.CODEBROO_MAX_SOURCE_BYTES || 32768),
-  concurrency: Number(process.env.CODEBROO_EXEC_CONCURRENCY || 2),
-  maxSteps: 600,
+  timeoutMs: clampInt(Number(process.env.CODEBROO_EXEC_TIMEOUT_MS || 5000), 1000, 10000, 5000),
+  maxOutput: clampInt(Number(process.env.CODEBROO_MAX_OUTPUT_BYTES || 65536), 4096, 131072, 65536),
+  maxSource: clampInt(Number(process.env.CODEBROO_MAX_SOURCE_BYTES || 32768), 1024, 32768, 32768),
+  concurrency: clampInt(Number(process.env.CODEBROO_EXEC_CONCURRENCY || 2), 1, 8, 2),
+  maxPending: clampInt(Number(process.env.CODEBROO_EXEC_MAX_PENDING || 16), 1, 64, 16),
+  maxSteps: clampInt(Number(process.env.CODEBROO_MAX_STEPS || 600), 50, 2000, 600),
 };
 
 const db = openDb(join(dataDir, "codebroo.db"));
 const app = new Hono();
 
 const runWindow = new Map<string, number[]>();
+const RUN_WINDOW_MS = 30_000;
+const RUN_LIMIT = 8;
+const RUN_MAX_TRACKED_SESSIONS = 10_000;
 
 function corsOrigin(origin: string): string | undefined {
   const o = origin.replace(/\/$/, "");
@@ -99,26 +106,57 @@ app.use(
   }),
 );
 app.use("*", secureHeaders());
+app.use("/api/*", async (c, next) => {
+  await next();
+  c.header("Cache-Control", "no-store");
+  c.header("X-Robots-Tag", "noindex, nofollow");
+});
 app.use("/api/*", bodyLimit({ maxSize: 80 * 1024, onError: (c) => c.json({ error: "payload too large" }, 413) }));
 
-function learnerId(c: { req: { raw: Request }; header: (n: string) => string | undefined }): string {
+function existingLearnerId(c: { req: { raw: Request }; header: (n: string) => string | undefined }): string | null {
   const token = getCookie(c as never, "broo_sid");
-  const existing = readSessionToken(effectiveSecret, token);
-  if (existing) {
-    db.prepare("UPDATE learners SET last_seen = ? WHERE id = ?").run(Date.now(), existing);
-    return existing;
+  const id = readSessionToken(effectiveSecret, token, Date.now(), SESSION_TTL_MS);
+  if (!id) return null;
+  const row = db.prepare("SELECT last_seen FROM learners WHERE id = ?").get(id) as { last_seen: number } | undefined;
+  if (!row) return null;
+  const now = Date.now();
+  if (now - row.last_seen > 5 * 60 * 1000) {
+    db.prepare("UPDATE learners SET last_seen = ? WHERE id = ?").run(now, id);
   }
+  return id;
+}
+
+function createLearner(c: { req: { raw: Request }; header: (n: string) => string | undefined }): string {
   const id = newLearnerId();
   const now = Date.now();
   db.prepare("INSERT INTO learners (id, name, created_at, last_seen) VALUES (?, ?, ?, ?)").run(id, "learner", now, now);
   setCookie(c as never, "broo_sid", makeSessionToken(effectiveSecret, id), {
     httpOnly: true,
-    sameSite: "Lax",
+    sameSite: "Strict",
     path: "/",
-    maxAge: 60 * 60 * 24 * 365,
+    maxAge: Math.floor(SESSION_TTL_MS / 1000),
     secure: isProd,
   });
   return id;
+}
+
+function requireLearner(c: { req: { raw: Request }; header: (n: string) => string | undefined }): string | null {
+  return existingLearnerId(c);
+}
+
+async function jsonObject(c: any): Promise<Record<string, unknown> | null> {
+  const body = await c.req.json().catch(() => null);
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  return body as Record<string, unknown>;
+}
+
+function finiteInt(value: unknown, min: number, max: number, fallback: number): number {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) ? Math.max(min, Math.min(max, Math.trunc(n))) : fallback;
+}
+
+function boundedString(value: unknown, max: number): string {
+  return typeof value === "string" ? value.slice(0, max) : "";
 }
 
 function loadEvidence(id: string, lessonId: string): MasteryEvidence {
@@ -173,13 +211,34 @@ function mistakesOf(id: string) {
 
 function allowRun(id: string): string | null {
   const now = Date.now();
-  const arr = (runWindow.get(id) ?? []).filter((t) => now - t < 30_000);
+  const arr = (runWindow.get(id) ?? []).filter((t) => now - t < RUN_WINDOW_MS);
   if (arr.length && now - arr[arr.length - 1] < 400) return "Slow down. The JVM is not a fidget toy.";
-  if (arr.length >= 8) return "Too many runs in 30s. Read the last error first.";
+  if (arr.length >= RUN_LIMIT) return "Too many runs in 30s. Read the last error first.";
   arr.push(now);
   runWindow.set(id, arr);
+  if (runWindow.size > RUN_MAX_TRACKED_SESSIONS) {
+    const first = runWindow.keys().next().value as string | undefined;
+    if (first) runWindow.delete(first);
+  }
   return null;
 }
+
+app.onError((err, c) => {
+  console.error(JSON.stringify({
+    ts: new Date().toISOString(),
+    path: new URL(c.req.url).pathname,
+    method: c.req.method,
+    error: err instanceof Error ? err.message : "unknown",
+  }));
+  return c.json({ error: "Internal server error" }, 500);
+});
+
+app.notFound((c) => c.json({ error: "Not found" }, 404));
+
+app.get("/api/ready", (c) => {
+  const java = existsSync(join(cfg.executorCp, "BrooExecutor.class"));
+  return c.json({ ok: java, java }, java ? 200 : 503);
+});
 
 app.get("/api/health", (c) =>
   c.json({
@@ -189,24 +248,38 @@ app.get("/api/health", (c) =>
   }),
 );
 
+const BUDDIES = ["mochi", "bibi", "momo", "koko", "pip"] as const;
+type BuddyId = typeof BUDDIES[number];
+
 app.get("/api/me", (c) => {
-  const id = learnerId(c);
-  const row = db.prepare("SELECT id, name, created_at FROM learners WHERE id = ?").get(id) as
-    | { id: string; name: string; created_at: number }
+  const id = existingLearnerId(c) ?? createLearner(c);
+  const row = db.prepare("SELECT id, name, buddy_id, onboarded, created_at FROM learners WHERE id = ?").get(id) as
+    | { id: string; name: string; buddy_id: BuddyId; onboarded: number; created_at: number }
     | undefined;
-  return c.json({ learner: row });
+  return c.json({
+    learner: row
+      ? { id: row.id, name: row.name, buddyId: row.buddy_id, onboarded: Boolean(row.onboarded), createdAt: row.created_at }
+      : null,
+    buddies: BUDDIES,
+  });
 });
 
 app.post("/api/me", async (c) => {
-  const id = learnerId(c);
-  const body = await c.req.json().catch(() => ({}));
+  const id = existingLearnerId(c) ?? createLearner(c);
+  const body = (await jsonObject(c)) ?? {};
   const name = typeof body.name === "string" ? body.name.slice(0, 40).trim() : "";
+  const buddyId = typeof body.buddyId === "string" && BUDDIES.includes(body.buddyId as BuddyId)
+    ? (body.buddyId as BuddyId)
+    : null;
+  if (!name && !buddyId) return c.json({ error: "Provide a valid name or buddyId" }, 400);
   if (name) db.prepare("UPDATE learners SET name = ? WHERE id = ?").run(name, id);
+  if (buddyId) db.prepare("UPDATE learners SET buddy_id = ?, onboarded = 1 WHERE id = ?").run(buddyId, id);
   return c.json({ ok: true });
 });
 
 app.get("/api/lessons", (c) => {
-  learnerId(c);
+  const id = requireLearner(c);
+  if (!id) return c.json({ error: "Session required" }, 401);
   return c.json({
     lessons: listLessons().map((l) => ({
       id: l.id,
@@ -219,7 +292,8 @@ app.get("/api/lessons", (c) => {
 });
 
 app.get("/api/lessons/:id", (c) => {
-  const id = learnerId(c);
+  const id = requireLearner(c);
+  if (!id) return c.json({ error: "Session required" }, 401);
   const lesson = getLesson(c.req.param("id"));
   if (!lesson) return c.json({ error: "Unknown lesson" }, 404);
   const progress = db
@@ -241,12 +315,14 @@ app.get("/api/lessons/:id", (c) => {
 });
 
 app.post("/api/lessons/:id/progress", async (c) => {
-  const id = learnerId(c);
+  const id = requireLearner(c);
+  if (!id) return c.json({ error: "Session required" }, 401);
   const lesson = getLesson(c.req.param("id"));
   if (!lesson) return c.json({ error: "Unknown lesson" }, 404);
-  const body = await c.req.json().catch(() => ({}));
-  const blockIndex = Number(body.blockIndex ?? 0);
-  const unlockedRun = body.unlockedRun ? 1 : 0;
+  const body = await jsonObject(c);
+  if (!body) return c.json({ error: "Invalid JSON object" }, 400);
+  const blockIndex = finiteInt(body.blockIndex, 0, lesson.blocks.length - 1, -1);
+  const unlockedRun = body.unlockedRun === true ? 1 : 0;
   if (!Number.isInteger(blockIndex) || blockIndex < 0 || blockIndex >= lesson.blocks.length) {
     return c.json({ error: "Invalid block" }, 400);
   }
@@ -259,17 +335,18 @@ app.post("/api/lessons/:id/progress", async (c) => {
 });
 
 app.post("/api/lessons/:id/predict", async (c) => {
-  const id = learnerId(c);
+  const id = requireLearner(c);
+  if (!id) return c.json({ error: "Session required" }, 401);
   const lesson = getLesson(c.req.param("id"));
   if (!lesson) return c.json({ error: "Unknown lesson" }, 404);
-  const body = await c.req.json().catch(() => ({}));
+  const body = await jsonObject(c);\n  if (!body) return c.json({ error: "Invalid JSON object" }, 400);
   const block = lesson.blocks.find((b) => b.id === body.blockId);
   if (!block || (block.kind !== "predict" && block.kind !== "transfer")) {
     return c.json({ error: "Not a prediction" }, 400);
   }
-  const choiceId = String(body.choiceId ?? "");
-  const firstTry = Boolean(body.firstTry);
-  const latencyMs = Number(body.latencyMs ?? 0);
+  const choiceId = boundedString(body.choiceId, 64);
+  const firstTry = body.firstTry === true;
+  const latencyMs = finiteInt(body.latencyMs, 0, 120000, 0);
   const correct = choiceId === block.correctId;
   let evidence = loadEvidence(id, lesson.id);
   if (block.kind === "predict") evidence = applyPrediction(evidence, correct, firstTry, latencyMs);
@@ -299,13 +376,14 @@ app.post("/api/lessons/:id/predict", async (c) => {
 });
 
 app.post("/api/lessons/:id/explain", async (c) => {
-  const id = learnerId(c);
+  const id = requireLearner(c);
+  if (!id) return c.json({ error: "Session required" }, 401);
   const lesson = getLesson(c.req.param("id"));
   if (!lesson) return c.json({ error: "Unknown lesson" }, 404);
-  const body = await c.req.json().catch(() => ({}));
+  const body = await jsonObject(c);\n  if (!body) return c.json({ error: "Invalid JSON object" }, 400);
   const block = lesson.blocks.find((b) => b.id === body.blockId && b.kind === "explain");
   if (!block || block.kind !== "explain") return c.json({ error: "Not an explain block" }, 400);
-  const text = String(body.text ?? "").slice(0, 4000);
+  const text = boundedString(body.text, 4000);
   const scored = scoreExplanation(text, block.mustInclude, block.traps);
   let evidence = applyExplanation(loadEvidence(id, lesson.id), scored.score);
   if (scored.hitTrap) noteMistake(id, "references", "incomplete-explanation", false);
@@ -328,13 +406,20 @@ app.post("/api/lessons/:id/explain", async (c) => {
 });
 
 app.post("/api/lessons/:id/mastery", async (c) => {
-  const id = learnerId(c);
+  const id = requireLearner(c);
+  if (!id) return c.json({ error: "Session required" }, 401);
   const lesson = getLesson(c.req.param("id"));
   if (!lesson) return c.json({ error: "Unknown lesson" }, 404);
-  const body = await c.req.json().catch(() => ({}));
+  const body = await jsonObject(c);\n  if (!body) return c.json({ error: "Invalid JSON object" }, 400);
   const block = lesson.blocks.find((b) => b.id === body.blockId && b.kind === "mastery");
   if (!block || block.kind !== "mastery") return c.json({ error: "Not a mastery block" }, 400);
-  const answers = (body.answers ?? {}) as Record<string, string>;
+  const rawAnswers = body.answers;
+  const answers: Record<string, string> = {};
+  if (rawAnswers && typeof rawAnswers === "object" && !Array.isArray(rawAnswers)) {
+    for (const [k, v] of Object.entries(rawAnswers)) {
+      if (typeof v === "string") answers[k.slice(0, 64)] = v.slice(0, 64);
+    }
+  }
   let correctCount = 0;
   const results = block.checks.map((ch) => {
     const ok = answers[ch.id] === ch.correctId;
@@ -351,33 +436,38 @@ app.post("/api/lessons/:id/mastery", async (c) => {
 });
 
 app.post("/api/lessons/:id/hint", async (c) => {
-  learnerId(c);
-  const body = await c.req.json().catch(() => ({}));
-  const topic = ["predict", "alias", "debug", "explain", "equals"].includes(body.topic) ? body.topic : "alias";
-  const level = Math.max(0, Math.min(4, Number(body.level ?? 0)));
+  const id = requireLearner(c);
+  if (!id) return c.json({ error: "Session required" }, 401);
+  const body = await jsonObject(c);\n  if (!body) return c.json({ error: "Invalid JSON object" }, 400);
+  const topic = typeof body.topic === "string" && ["predict", "alias", "debug", "explain", "equals"].includes(body.topic) ? body.topic : "alias";
+  const level = finiteInt(body.level, 0, 4, 0);
   return c.json({ tutor: tutorFor({ topic, level, mistake: body.mistake }) });
 });
 
 app.post("/api/stop", (c) => {
-  const id = learnerId(c);
+  const id = requireLearner(c);
+  if (!id) return c.json({ error: "Session required" }, 401);
   return c.json({ stopped: stopJava(id) });
 });
 
 app.post("/api/run", async (c) => {
-  const id = learnerId(c);
+  const id = requireLearner(c);
+  if (!id) return c.json({ error: "Session required" }, 401);
   const limited = allowRun(id);
   if (limited) return c.json({ error: limited }, 429);
-  const body = await c.req.json().catch(() => ({}));
-  const source = String(body.source ?? "");
-  const lessonId = String(body.lessonId ?? TWO_REMOTE_CONTROLS.id);
-  const blockId = String(body.blockId ?? "");
+  const body = await jsonObject(c);\n  if (!body) return c.json({ error: "Invalid JSON object" }, 400);
+  const source = boundedString(body.source, cfg.maxSource);
+  if (!source) return c.json({ error: "Source is required" }, 400);
+  const lessonId = boundedString(body.lessonId, 128) || TWO_REMOTE_CONTROLS.id;
+  const blockId = boundedString(body.blockId, 128);
   const lesson = getLesson(lessonId);
   if (!lesson) return c.json({ error: "Unknown lesson" }, 404);
   const result = await runJava({ source, cfg, sessionId: id });
+  if (result.busy) return c.json({ error: result.denied ?? "Execution capacity is busy" }, 503);
   let evidence = applyRun(loadEvidence(id, lessonId), result.compileErrors.length === 0, !result.timedOut && !result.denied);
   const block = lesson.blocks.find((b) => b.id === blockId);
   if (block?.kind === "debug" && result.stdout.includes(block.passWhen.stdoutIncludes ?? "\u0000")) {
-    const hintsUsed = Number(body.hintsUsed ?? 0);
+    const hintsUsed = finiteInt(body.hintsUsed, 0, 8, 0);
     evidence = applyDebug(evidence, true, hintsUsed);
     noteMistake(id, "references", "alias-as-copy", true);
   }
@@ -405,7 +495,8 @@ app.post("/api/run", async (c) => {
 });
 
 app.get("/api/skills", (c) => {
-  const id = learnerId(c);
+  const id = requireLearner(c);
+  if (!id) return c.json({ error: "Session required" }, 401);
   const evidence = loadEvidence(id, TWO_REMOTE_CONTROLS.id);
   return c.json({
     skills: [

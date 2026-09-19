@@ -8,10 +8,10 @@ import type {
   Snapshot,
   TutorTurn,
 } from "@codebroo/core";
-import { EMPTY_EVIDENCE, TWO_REMOTE_CONTROLS } from "@codebroo/core";
+import { EMPTY_EVIDENCE, TWO_REMOTE_CONTROLS, type BuddyId } from "@codebroo/core";
 import { api } from "./api";
 import { Broo } from "./Broo";
-import { HeapViz } from "./HeapViz";
+import { HeapViz } from "./HeapViz";\nimport { BuddyPicker } from "./BuddyPicker";\nimport { BUDDIES } from "./buddies";
 
 const JavaEditor = lazy(() => import("./JavaEditor").then((m) => ({ default: m.JavaEditor })));
 
@@ -27,6 +27,8 @@ export function Workspace() {
   const [mastered, setMastered] = useState(false);
   const [skills, setSkills] = useState<Array<{ id: string; label: string; value: number }>>([]);
   const [loadErr, setLoadErr] = useState<string | null>(null);
+  const [buddyId, setBuddyId] = useState<BuddyId>("mochi");
+  const [showBuddyPicker, setShowBuddyPicker] = useState(false);
 
   const [choice, setChoice] = useState<string | null>(null);
   const [predictResult, setPredictResult] = useState<{ correct: boolean; reveal: string[] } | null>(null);
@@ -47,6 +49,9 @@ export function Workspace() {
   const [hideBroo, setHideBroo] = useState(false);
   const [busy, setBusy] = useState(false);
 
+  const buddy = BUDDIES.find((item) => item.id === buddyId) ?? BUDDIES[0];
+  const journeyPercent = lesson ? Math.round(((index + 1) / Math.max(1, lesson.blocks.length)) * 100) : 0;
+
   const block: LessonBlock | undefined = lesson?.blocks[index];
   const snapshots = result?.snapshots ?? [];
   const snap = snapshots[Math.min(snapIndex, Math.max(0, snapshots.length - 1))] ?? null;
@@ -54,6 +59,10 @@ export function Workspace() {
 
   const load = useCallback(async () => {
     try {
+      const me = await api.me();
+      setBuddyId(me.learner.buddyId);
+      setShowBuddyPicker(!me.learner.onboarded);
+
       const [l, s] = await Promise.all([api.lesson(LESSON_ID), api.skills()]);
       setLesson(l.lesson);
       setIndex(l.progress.block_index);
@@ -126,6 +135,21 @@ export function Workspace() {
     await api.progress(LESSON_ID, far, unlockedRun).catch(() => undefined);
   }
 
+  async function chooseBuddy(next: BuddyId) {
+    setBuddyId(next);
+    setShowBuddyPicker(false);
+    try {
+      await api.updateProfile({ buddyId: next });
+    } catch (e) {
+      setShowBuddyPicker(true);
+      setTutor({
+        text: e instanceof Error ? e.message : "Couldn't save your buddy yet.",
+        companion: "warning",
+        escalate: false,
+      });
+    }
+  }
+
   async function submitPredict() {
     if (!block || (block.kind !== "predict" && block.kind !== "transfer") || !choice || busy) return;
     setBusy(true);
@@ -195,7 +219,7 @@ export function Workspace() {
       } else if (res.result.exception) {
         setCompanion("investigating");
         setTutor({
-          text: `${res.result.exception.type}: ${res.result.exception.msg} @ ${res.result.exception.stack}`,
+          text: `${res.result.exception.type}: ${res.result.exception.msg}`,
           companion: "investigating",
           escalate: false,
         });
@@ -292,6 +316,8 @@ export function Workspace() {
       </div>
     );
   }
+  if (showBuddyPicker) return <BuddyPicker value={buddyId} onChoose={(id) => void chooseBuddy(id)} />;
+
   if (!lesson || !block) {
     return (
       <div className="crash">
@@ -320,8 +346,14 @@ export function Workspace() {
           <ol className="steps">
             {lesson.blocks.map((b, i) => (
               <li key={b.id}>
-                <button className={i === index ? "on" : ""} disabled={!canEnter(i)} onClick={() => void go(i)}>
-                  {i + 1}. {titleOf(b)}
+                <button
+                  className={(i === index ? "on " : "") + (i <= farthest ? "visited" : "")}
+                  disabled={!canEnter(i)}
+                  aria-current={i === index ? "step" : undefined}
+                  onClick={() => void go(i)}
+                >
+                  <span className="step-node" aria-hidden="true">{i < farthest ? "✓" : i + 1}</span>
+                  <span>{titleOf(b)}</span>
                 </button>
               </li>
             ))}
@@ -345,7 +377,16 @@ export function Workspace() {
 
       <main className="stage">
         <header className="stage-head">
-          <p className="kicker">{block.kind}</p>
+          <div className="lesson-meta">
+            <div>
+              <p className="kicker">{block.kind}</p>
+              <span className="path-label">Java path · {index + 1} of {lesson.blocks.length}</span>
+            </div>
+            <div className="journey-progress" aria-label={`Lesson progress ${journeyPercent}%`}>
+              <span>{journeyPercent}% through this lesson</span>
+              <div className="journey-track"><i style={{ width: `${journeyPercent}%` }} /></div>
+            </div>
+          </div>
           <h1>{headingOf(block)}</h1>
           <p className="lede">{ledeOf(block)}</p>
         </header>
@@ -401,17 +442,29 @@ export function Workspace() {
 
       <aside className="tutor">
         <div className="broo-dock">
-          {!hideBroo && <Broo state={companion} minimized={false} onToggle={() => setHideBroo(true)} />}
-          {hideBroo && <Broo state={companion} minimized onToggle={() => setHideBroo(false)} />}
-          <div>
-            <h2 style={{ border: 0, padding: 0 }}>Tutor</h2>
-            <p className="tagline" style={{ color: "#3f3832" }}>
-              Deterministic. No API required.
-            </p>
+          <div className="buddy-identity">
+            {!hideBroo && <Broo buddyId={buddyId} state={companion} minimized={false} onToggle={() => setHideBroo(true)} />}
+            {hideBroo && <Broo buddyId={buddyId} state={companion} minimized onToggle={() => setHideBroo(false)} />}
+            <div>
+              <span className="buddy-eyebrow">Your study buddy</span>
+              <strong>{buddy.name}</strong>
+              <span>{buddy.vibe}</span>
+            </div>
+          </div>
+          <div className="tutor-heading">
+            <h2>Tutor</h2>
+            <button className="text-button" type="button" onClick={() => setShowBuddyPicker(true)}>Change buddy</button>
           </div>
         </div>
         <div className="tutor-log">
-          <p>{tutor.text}</p>
+          <div className="tutor-bubble">
+            <span className="bubble-kicker">{buddy.name} says</span>
+            <p>{tutor.text}</p>
+          </div>
+          <div className="tutor-signal">
+            <span className={mastered ? "signal-dot mastered" : "signal-dot"} />
+            <span>{mastered ? "Lesson mastered" : `Mastery ${Math.round(overall * 100)}%`}</span>
+          </div>
         </div>
         <div className="hint-row">
           <button className="ghost" onClick={() => void hint()}>
