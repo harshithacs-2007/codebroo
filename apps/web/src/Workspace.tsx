@@ -11,7 +11,7 @@ import type {
 import { EMPTY_EVIDENCE, TWO_REMOTE_CONTROLS, type BuddyId } from "@codebroo/core";
 import { api } from "./api";
 import { Broo } from "./Broo";
-import { HeapViz } from "./HeapViz";\nimport { BuddyPicker } from "./BuddyPicker";
+import { HeapViz } from "./HeapViz";\nimport { BuddyPicker } from "./BuddyPicker";\nimport { BUDDIES } from "./buddies";
 
 const JavaEditor = lazy(() => import("./JavaEditor").then((m) => ({ default: m.JavaEditor })));
 
@@ -48,6 +48,9 @@ export function Workspace() {
   const [companion, setCompanion] = useState<CompanionState>("idle");
   const [hideBroo, setHideBroo] = useState(false);
   const [busy, setBusy] = useState(false);
+
+  const buddy = BUDDIES.find((item) => item.id === buddyId) ?? BUDDIES[0];
+  const journeyPercent = lesson ? Math.round(((index + 1) / Math.max(1, lesson.blocks.length)) * 100) : 0;
 
   const block: LessonBlock | undefined = lesson?.blocks[index];
   const snapshots = result?.snapshots ?? [];
@@ -368,7 +371,16 @@ export function Workspace() {
 
       <main className="stage">
         <header className="stage-head">
-          <p className="kicker">{block.kind}</p>
+          <div className="lesson-meta">
+            <div>
+              <p className="kicker">{block.kind}</p>
+              <span className="path-label">Java path · {index + 1} of {lesson.blocks.length}</span>
+            </div>
+            <div className="journey-progress" aria-label={`Lesson progress ${journeyPercent}%`}>
+              <span>{journeyPercent}% through this lesson</span>
+              <div className="journey-track"><i style={{ width: `${journeyPercent}%` }} /></div>
+            </div>
+          </div>
           <h1>{headingOf(block)}</h1>
           <p className="lede">{ledeOf(block)}</p>
         </header>
@@ -424,17 +436,29 @@ export function Workspace() {
 
       <aside className="tutor">
         <div className="broo-dock">
-          {!hideBroo && <Broo buddyId={buddyId} state={companion} minimized={false} onToggle={() => setHideBroo(true)} />}
-          {hideBroo && <Broo buddyId={buddyId} state={companion} minimized onToggle={() => setHideBroo(false)} />}
-          <div>
-            <h2 style={{ border: 0, padding: 0 }}>Tutor</h2>
-            <p className="tagline" style={{ color: "#3f3832" }}>
-              Deterministic. No API required.
-            </p>
+          <div className="buddy-identity">
+            {!hideBroo && <Broo buddyId={buddyId} state={companion} minimized={false} onToggle={() => setHideBroo(true)} />}
+            {hideBroo && <Broo buddyId={buddyId} state={companion} minimized onToggle={() => setHideBroo(false)} />}
+            <div>
+              <span className="buddy-eyebrow">Your study buddy</span>
+              <strong>{buddy.name}</strong>
+              <span>{buddy.vibe}</span>
+            </div>
+          </div>
+          <div className="tutor-heading">
+            <h2>Tutor</h2>
+            <button className="text-button" type="button" onClick={() => setShowBuddyPicker(true)}>Change buddy</button>
           </div>
         </div>
         <div className="tutor-log">
-          <p>{tutor.text}</p>
+          <div className="tutor-bubble">
+            <span className="bubble-kicker">{buddy.name} says</span>
+            <p>{tutor.text}</p>
+          </div>
+          <div className="tutor-signal">
+            <span className={mastered ? "signal-dot mastered" : "signal-dot"} />
+            <span>{mastered ? "Lesson mastered" : `Mastery ${Math.round(overall * 100)}%`}</span>
+          </div>
         </div>
         <div className="hint-row">
           <button className="ghost" onClick={() => void hint()}>
