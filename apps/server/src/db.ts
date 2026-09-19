@@ -15,6 +15,8 @@ export function openDb(path: string): DatabaseSync {
     CREATE TABLE IF NOT EXISTS learners (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL DEFAULT 'learner',
+      buddy_id TEXT NOT NULL DEFAULT 'mochi',
+      onboarded INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL,
       last_seen INTEGER NOT NULL
     );
@@ -63,8 +65,16 @@ export function openDb(path: string): DatabaseSync {
     CREATE INDEX IF NOT EXISTS idx_mistakes_learner_recency
       ON mistakes (learner_id, recency DESC);
   `);
+  migrateLearners(db);
   pruneOldAttempts(db);
   return db;
+}
+
+function migrateLearners(db: DatabaseSync) {
+  const columns = db.prepare("PRAGMA table_info(learners)").all() as Array<{ name: string }>;
+  const names = new Set(columns.map((c) => c.name));
+  if (!names.has("buddy_id")) db.exec("ALTER TABLE learners ADD COLUMN buddy_id TEXT NOT NULL DEFAULT 'mochi'");
+  if (!names.has("onboarded")) db.exec("ALTER TABLE learners ADD COLUMN onboarded INTEGER NOT NULL DEFAULT 0");
 }
 
 function pruneOldAttempts(db: DatabaseSync) {
